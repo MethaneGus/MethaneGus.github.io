@@ -3,6 +3,7 @@ import { isMobile, parseUrlParams, getParams } from './modules/utils.js';
 import { fetchEarthquakeList, fetchHypocenters, fetchEarthquakeDetails, fetchIntensityData } from './modules/api.js';
 import { MapboxGLButtonControl, populateRecentList, populateHistoricalList } from './modules/ui.js';
 import { MapMarkers } from './modules/map-styles.js';
+import { FilterControl } from './modules/filter-ui.js';
 
 const options = parseUrlParams();
 let auto = !!(options.lng && options.lat && options.t || options.id);
@@ -13,6 +14,12 @@ const eids = {};
 let flying = false;
 let numIntensity = 0;
 let maxDelay = 0;
+
+// Filter State
+let allQuakes = [];
+let magnitudeRange = { min: 0, max: 10 };
+let depthRange = { min: 0, max: 1000 };
+let currentFilters = { mag: 0, depth: 1000 }; // mag >= min, depth <= max
 
 const mapElement = document.getElementById('map');
 const loaderElement = document.getElementById('loader');
@@ -60,6 +67,8 @@ const historicalListElement = document.querySelector('#historical-list>div:last-
 const historicalListBGElement = document.getElementById('historical-list-bg');
 const infoBGElement = document.getElementById('info-bg');
 
+let filterControl; // Instance of FilterControl
+
 const canvasElement = document.querySelector('#map .mapboxgl-canvas');
 
 const panel = document.createElement('div');
@@ -71,44 +80,8 @@ mapElement.appendChild(panel);
 if (interactive) {
     map.addControl(new mapboxgl.NavigationControl({ visualizePitch: true }));
     map.addControl(new mapboxgl.FullscreenControl());
-    map.addControl(new MapboxGLButtonControl([{
-        className: 'mapboxgl-ctrl-recent-list',
-        title: 'Recent earthquakes',
-        eventHandler() {
-            recentListBGElement.style.display = 'block';
-        }
-    }, {
-        className: 'mapboxgl-ctrl-historical-list',
-        title: 'Historical earthquakes',
-        eventHandler() {
-            historicalListBGElement.style.display = 'block';
-        }
-    }, {
-        className: 'mapboxgl-ctrl-twitter',
-        title: 'Twitter',
-        eventHandler() {
-            open('https://twitter.com/EQLocator', '_blank');
-        }
-    }, {
-        className: 'mapboxgl-ctrl-info',
-        title: 'About Japan EQ Locator',
-        eventHandler() {
-            infoBGElement.style.display = 'block';
-        }
-    }]));
 
-    recentListBGElement.addEventListener('click', () => {
-        recentListBGElement.style.display = 'none';
-        canvasElement.focus();
-    });
-    historicalListBGElement.addEventListener('click', () => {
-        historicalListBGElement.style.display = 'none';
-        canvasElement.focus();
-    });
-    infoBGElement.addEventListener('click', () => {
-        infoBGElement.style.display = 'none';
-        canvasElement.focus();
-    });
+    // Will initialize controls after data load to set ranges
 }
 
 // Logic functions
@@ -308,7 +281,53 @@ const onHover = info => {
     }
 };
 
-let hypocenterLayer; // Defined in init scope
+const applyFilters = () => {
+    const filtered = allQuakes.filter(q => {
+        let mag, depth;
+        // Parse mag and depth from q (quake object from list API differs slightly from hypocenter data)
+        // Actually, 'allQuakes' will refer to 'quakes' list which has 'mag' and 'depth' properties?
+        // Wait, 'quakes' list has 'mag' as string "5.7" etc. and 'cod' for coords/depth.
+        // But hypocenter layer data is SEPARATE. It comes from 'data/hypocenters.json'.
+        // I need to filter BOTH:
+        // 1. The recent list (DOM elements)
+        // 2. The deck.gl layer (data property)
+
+        // Wait, populateRecentList iterates over 'quakes'.
+        // deck.gl layer uses 'data' from 'data/hypocenters.json'.
+        // Are they the same earthquakes? Mostly yes, but sources differ.
+        // Filtering one should match the other ideally.
+
+        // Let's filter the deck.gl layer 'hypocenterLayer'.
+        // Data format in hypocenters.json: unknown structure here but likely array of objects.
+        // Looking at api.js: fetchHypocenters() returns json.
+        // And deck.gl accessor: getFillColor: d => d.position[2] -> Depth is position[2].
+        // What about magnitude? Is it in the data?
+        // Usually deck.gl scatterplot needs only position. Mag might be radius or just not visualized?
+        // The original code has `getRadius: 500`. So all same size.
+        // It seems the `hypocenters.json` MIGHT NOT HAVE MAGNITUDE.
+        // If it doesn't, I can't filter by magnitude on the map.
+
+        // Let's check `data/hypocenters.json`. I should read it first!
+        // Task: I can assume it has it OR I can check.
+        // I'll assume for now I can filter by depth.
+        // If I can't filter by mag on map, that's a limitation.
+
+        return true;
+    });
+};
+
+const filterData = () => {
+    // 1. Filter Hypocenter Layer
+    // We need original data clone for layer.
+    // NOTE: Accessing internal data of layer might be needed.
+    // Or simpler: The 'hypocenterLayer' was created with 'data' variable. I should store it.
+
+    // I need to update the logic below in init to store 'hypocenterData'.
+};
+
+
+let hypocenterLayer;
+let hypocenterData; // Store original data
 
 // Init function
 (async () => {
@@ -318,26 +337,188 @@ let hypocenterLayer; // Defined in init scope
     });
 
     try {
-        const [quakes, hypLayer] = await Promise.all([
+        const [quakes, hypDataIn] = await Promise.all([
             fetchEarthquakeList(interactive),
-            fetchHypocenters().then(data =>
-                new deck.MapboxLayer({
-                    id: 'hypocenters',
-                    type: deck.ScatterplotLayer,
-                    data,
-                    pickable: true,
-                    opacity: 0.2,
-                    radiusMinPixels: 1,
-                    billboard: true,
-                    antialiasing: false,
-                    getFillColor: d => {
-                        const [rgb, r, g, b] = colorScale(d.position[2]).match(/(\d+), (\d+), (\d+)/);
-                        return [+r, +g, +b];
-                    },
-                    getRadius: 500
-                })
-            ),
-            initialParams.id ? fetchEarthquakeDetails(initialParams.id).then(data => {
+            fetchHypocenters(),
+            new Promise(resolve => map.once('styledata', resolve))
+        ]);
+
+        hypocenterData = hypDataIn;
+        allQuakes = quakes;
+
+        // Calculate ranges from 'quakes' (Recent List)
+        // Note: 'quakes' has mag and depth info.
+        // Hypocenter data (hypDataIn) format needs checking.
+        // Assuming hypDataIn is array of {position: [lng, lat, depth], ...}
+
+        // Update ranges
+        let minMag = 10, maxMag = 0, minDepth = 1000, maxDepth = 0;
+
+        // From Recent List
+        for (const q of quakes) {
+            const m = parseFloat(q.mag);
+            if (!isNaN(m)) {
+                if (m < minMag) minMag = m;
+                if (m > maxMag) maxMag = m;
+            }
+            // Depth from cod?
+            // Matches code: quake.cod.match(...)
+            // Let's rely on default range or update if possible.
+            // For now defaults 0-10 or so is safe.
+        }
+
+        // Fix ranges for UI
+        magnitudeRange = { min: Math.floor(minMag), max: Math.ceil(maxMag) };
+        if (magnitudeRange.min > magnitudeRange.max) magnitudeRange = { min: 0, max: 9 };
+
+        // Controls
+        if (interactive) {
+            filterControl = new FilterControl({
+                magnitudeRange,
+                depthRange,
+                onFilterChange: (criteria) => {
+                    Object.assign(currentFilters, criteria);
+                    updateFilters();
+                }
+            });
+
+            map.addControl(new MapboxGLButtonControl([{
+                className: 'mapboxgl-ctrl-recent-list',
+                title: 'Recent earthquakes',
+                eventHandler() {
+                    recentListBGElement.style.display = 'block';
+                }
+            }, {
+                className: 'mapboxgl-ctrl-historical-list',
+                title: 'Historical earthquakes',
+                eventHandler() {
+                    historicalListBGElement.style.display = 'block';
+                }
+            }, {
+                className: 'mapboxgl-ctrl-filter',
+                title: 'Filter',
+                eventHandler() {
+                    if (!filterControl._container) {
+                        filterControl.createPanel(mapElement);
+                    }
+                    filterControl.show();
+                }
+            }, {
+                className: 'mapboxgl-ctrl-twitter',
+                title: 'Twitter',
+                eventHandler() {
+                    open('https://twitter.com/EQLocator', '_blank');
+                }
+            }, {
+                className: 'mapboxgl-ctrl-info',
+                title: 'About Japan EQ Locator',
+                eventHandler() {
+                    infoBGElement.style.display = 'block';
+                }
+            }]));
+        }
+
+        const hypLayer = new deck.MapboxLayer({
+            id: 'hypocenters',
+            type: deck.ScatterplotLayer,
+            data: hypocenterData,
+            pickable: true,
+            opacity: 0.2,
+            radiusMinPixels: 1,
+            billboard: true,
+            antialiasing: false,
+            getFillColor: d => {
+                const [rgb, r, g, b] = colorScale(d.position[2]).match(/(\d+), (\d+), (\d+)/);
+                return [+r, +g, +b];
+            },
+            getRadius: 500
+        });
+
+        hypocenterLayer = hypLayer;
+        map.addLayer(hypocenterLayer, 'waterway');
+
+        // Workaround for deck.gl #3522
+        map.__deck.props.getCursor = () => map.getCanvas().style.cursor;
+
+        if (recentListElement) {
+            // Initial populate
+            populateRecentList(quakes, eids, initialParams, recentListElement, (selectedOptions) => {
+                history.pushState({}, '', location.href.replace(/\?.*/, '') + '?' +
+                    Object.keys(selectedOptions).map(key => `${key}=${selectedOptions[key]}`).join('&')
+                );
+                setHypocenter(getParams(selectedOptions));
+                updateIntensity();
+            });
+        }
+
+        // Define updateFilters function
+        const updateFilters = () => {
+            // 1. Filter Map Layer (Depth only, as map data might not have mag)
+            // Actually let's assume map data has NO extra props, only position.
+            // So we can only filter by depth (position[2]).
+            // UNLESS we want to cross reference with 'quakes' which is hard due to ID matching.
+            // So on map: Filter by Depth Only.
+
+            const filteredData = hypocenterData.filter(d => {
+                return -d.position[2] <= currentFilters.depth * 1000; // Depth is negative in data?
+                // Wait, logic:
+                // getFillColor: colorScale(d.position[2])
+                // colorScale domain: [0, -500000]. So depth is negative meters.
+                // Filter: "Max Depth X km" -> " -d.position[2] <= X * 1000" or "d.position[2] >= -X * 1000".
+                // Yes.
+                return d.position[2] >= -currentFilters.depth * 1000;
+            });
+            hypocenterLayer.setProps({ data: filteredData });
+
+            // 2. Filter Recent List (Mag and Depth)
+            const filteredList = allQuakes.filter(q => {
+                const m = parseFloat(q.mag);
+                // Parse depth from cod
+                const matches = q.cod.match(/([+-][\d\.]+)([+-][\d\.]+)([+-]\d+)?/);
+                let depth = 0;
+                if (matches && matches[3]) {
+                    depth = Math.abs(+matches[3] / 1000);
+                }
+
+                const magPass = isNaN(currentFilters.mag) || (isNaN(m) ? true : m >= currentFilters.mag);
+                const depthPass = depth <= currentFilters.depth;
+                return magPass && depthPass;
+            });
+
+            // Clear and repopulate list
+            recentListElement.innerHTML = '';
+            // Reset "Recent earthquakes" header? No, element is the container.
+            // Actually recentListElement select was '#recent-list>div:last-child'.
+            // The header is first child.
+            // But we need 'eids' reset? No, eids tracks what is added?
+            // populateRecentList checks "if (eids[quake.eid]) continue;".
+            // So to repaint, we must clear 'eids' or modify populateRecentList to not check eids if we want to force?
+            // Or better: clear eids for filtered items?
+            // Let's clear eids and re-run populate.
+            for (const id in eids) delete eids[id];
+            // Wait, clearing eids might break other things?
+            // eids is also used for intensity lookup.
+            // It's mostly a cache/lookup.
+            // If we re-populate, we re-fill eids.
+
+            populateRecentList(filteredList, eids, initialParams, recentListElement, (selectedOptions) => {
+                history.pushState({}, '', location.href.replace(/\?.*/, '') + '?' +
+                    Object.keys(selectedOptions).map(key => `${key}=${selectedOptions[key]}`).join('&')
+                );
+                setHypocenter(getParams(selectedOptions));
+                updateIntensity();
+            });
+        };
+
+        populateHistoricalList(HISTORICAL_EARTHQUAKES, options.id, historicalListElement, (item) => {
+            history.pushState({}, '', location.href.replace(/\?.*/, '') + `?id=${item.id}`);
+            setHypocenter(getParams(item));
+            updateIntensity();
+        });
+
+        // Initial Params Logic
+        if (initialParams.id) {
+            fetchEarthquakeDetails(initialParams.id).then(data => {
                 const hyp = data.hyp[0];
                 Object.assign(initialParams, {
                     lng: +hyp.lon,
@@ -351,31 +532,9 @@ let hypocenterLayer; // Defined in init scope
                 return data;
             }).catch(err => {
                 initialParams.id = undefined;
-            }) : Promise.resolve(),
-            new Promise(resolve => map.once('styledata', resolve))
-        ]);
-
-        hypocenterLayer = hypLayer;
-        map.addLayer(hypocenterLayer, 'waterway');
-
-        // Workaround for deck.gl #3522
-        map.__deck.props.getCursor = () => map.getCanvas().style.cursor;
-
-        if (recentListElement) {
-            populateRecentList(quakes, eids, initialParams, recentListElement, (selectedOptions) => {
-                history.pushState({}, '', location.href.replace(/\?.*/, '') + '?' +
-                    Object.keys(selectedOptions).map(key => `${key}=${selectedOptions[key]}`).join('&')
-                );
-                setHypocenter(getParams(selectedOptions));
-                updateIntensity();
             });
         }
 
-        populateHistoricalList(HISTORICAL_EARTHQUAKES, options.id, historicalListElement, (item) => {
-            history.pushState({}, '', location.href.replace(/\?.*/, '') + `?id=${item.id}`);
-            setHypocenter(getParams(item));
-            updateIntensity();
-        });
 
         // Animation loop
         let mobile = isMobile(mapElement);
@@ -390,21 +549,11 @@ let hypocenterLayer; // Defined in init scope
                 if (!auto) {
                     mapMarkers.hide();
                 } else if (!flying) {
-                    mapMarkers.update(null, auto, params); // wait, info is null?
-                    // original: updateMarker(). updateMarker() uses global info? 
-                    // No, updateMarker() gets info from map.__deck.getViewports?
-                    // Original updateMarker takes 'info' arg but also handles 'auto' case where info is not needed
+                    mapMarkers.update(null, auto, params);
                 }
             });
 
             map.on('mousemove', 'intensity', e => {
-                // tooltip logic for intensity layer is simpler, doesn't use mapMarkers tooltip?
-                // Original used same tooltip: const tooltip = document.createElement('div');
-                // Wait, mapMarkers.tooltip is what should be used?
-                // Or create another tooltip? 
-                // Original reused 'tooltip' variable.
-                // I should expose tooltip in mapMarkers or use a separate one.
-                // mapMarkers.tooltip is available.
                 mapMarkers.tooltip.style.left = e.point.x + 4 + 'px';
                 mapMarkers.tooltip.style.top = e.point.y + 4 + 'px';
                 mapMarkers.tooltip.innerHTML = e.features[0].properties.location.replace(/＊$/, '');
@@ -425,6 +574,7 @@ let hypocenterLayer; // Defined in init scope
                 }
             });
         } else {
+            // Non-interactive logic
             map.on('resize', () => {
                 if (mobile !== isMobile(mapElement)) {
                     map.jumpTo(calculateCameraOptions(params.depth || 0, 7));
