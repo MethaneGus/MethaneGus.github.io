@@ -2,6 +2,7 @@ export class FilterControl {
     constructor(options) {
         this._options = options || {};
         this._container = null;
+        this._wrapper = null;
         this.onFilterChange = options.onFilterChange || (() => { });
     }
 
@@ -16,11 +17,11 @@ export class FilterControl {
         header.innerText = 'フィルター';
         this._container.appendChild(header);
 
-        // Magnitude Slider
-        this._createSlider('マグニチュード', 'mag', this._options.magnitudeRange);
-
         // Depth Slider
         this._createSlider('深さ (km)', 'depth', this._options.depthRange);
+
+        // Intensity Checkbox
+        this._createCheckbox('震度情報がある震源のみ表示', 'hasIntensity');
 
         // Close Button
         const closeBtn = document.createElement('div');
@@ -55,16 +56,21 @@ export class FilterControl {
 
     // Helper to create independent panel
     createPanel(mapElement) {
+        this._wrapper = document.createElement('div');
+        this._wrapper.className = 'bg filter-bg';
+        this._wrapper.style.display = 'none';
+
         this._container = document.createElement('div');
-        this._container.className = 'filter-panel hidden';
+        this._container.className = 'filter-panel';
 
         const header = document.createElement('div');
         header.className = 'filter-header';
         header.innerText = '絞り込み';
         this._container.appendChild(header);
 
-        this._magContainer = this._createSlider(this._container, 'マグニチュード', 'mag', this._options.magnitudeRange);
+        this._magContainer = null; // Removed
         this._depthContainer = this._createSlider(this._container, '深さ (km)', 'depth', this._options.depthRange);
+        this._intensityContainer = this._createCheckbox(this._container, '震度情報がある震源のみ表示', 'hasIntensity');
 
         const closeBtn = document.createElement('div');
         closeBtn.className = 'close-button';
@@ -73,7 +79,16 @@ export class FilterControl {
         });
         this._container.appendChild(closeBtn);
 
-        mapElement.appendChild(this._container);
+        this._wrapper.appendChild(this._container);
+
+        // Click on background to close
+        this._wrapper.addEventListener('click', (e) => {
+            if (e.target === this._wrapper) {
+                this.hide();
+            }
+        });
+
+        mapElement.appendChild(this._wrapper);
         return this;
     }
 
@@ -129,11 +144,51 @@ export class FilterControl {
         return wrapper;
     }
 
+    _createCheckbox(parent, label, id) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'filter-item';
+
+        const labelDiv = document.createElement('label');
+        labelDiv.className = 'filter-label checkbox-label';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = false;
+        checkbox.className = 'filter-checkbox';
+
+        checkbox.onchange = (e) => {
+            this.onFilterChange({ [id]: e.target.checked });
+        };
+
+        labelDiv.appendChild(checkbox);
+        labelDiv.appendChild(document.createTextNode(` ${label}`));
+
+        wrapper.appendChild(labelDiv);
+        parent.appendChild(wrapper);
+
+        return wrapper;
+    }
+
     show() {
-        this._container.classList.remove('hidden');
+        if (this._wrapper) {
+            this._wrapper.style.display = 'block';
+        } else {
+            this._container.classList.remove('hidden');
+        }
     }
 
     hide() {
-        this._container.classList.add('hidden');
+        if (this._wrapper) {
+            this._wrapper.style.display = 'none';
+        } else {
+            this._container.classList.add('hidden');
+        }
+    }
+
+    isVisible() {
+        if (this._wrapper) {
+            return this._wrapper.style.display !== 'none';
+        }
+        return !this._container.classList.contains('hidden');
     }
 }

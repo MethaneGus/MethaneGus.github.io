@@ -17,9 +17,9 @@ let maxDelay = 0;
 
 // Filter State
 let allQuakes = [];
-let magnitudeRange = { min: 0, max: 10 };
-let depthRange = { min: 0, max: 1000 };
-let currentFilters = { mag: 0, depth: 1000 }; // mag >= min, depth <= max
+// let magnitudeRange = { min: 0, max: 10 }; // Removed
+let depthRange = { min: 0, max: 500 };
+let currentFilters = { depth: 500, hasIntensity: false }; // depth <= max, hasIntensity bool
 
 const mapElement = document.getElementById('map');
 const loaderElement = document.getElementById('loader');
@@ -66,6 +66,24 @@ const recentListBGElement = document.getElementById('recent-list-bg');
 const historicalListElement = document.querySelector('#historical-list>div:last-child');
 const historicalListBGElement = document.getElementById('historical-list-bg');
 const infoBGElement = document.getElementById('info-bg');
+
+// Add close buttons to panels immediately
+[recentListBGElement, historicalListBGElement, infoBGElement].forEach(bg => {
+    const closeBtn = document.createElement('div');
+    closeBtn.className = 'close-button';
+    closeBtn.onclick = () => {
+        bg.style.display = 'none';
+        // Also hide filters if open? No, separate.
+    };
+    bg.appendChild(closeBtn);
+
+    // Add click-to-close on background
+    bg.addEventListener('click', (e) => {
+        if (e.target === bg) {
+            bg.style.display = 'none';
+        }
+    });
+});
 
 let filterControl; // Instance of FilterControl
 
@@ -142,21 +160,23 @@ const updateIntensity = async () => {
                 delay: (distance - minDistance) * 20
             }
         }));
-        map.getSource('intensity').setData({
-            type: 'FeatureCollection',
-            features
-        });
-        numIntensity = features.length;
-        maxDelay = (maxDistance - minDistance) * 20 + 500;
-        await new Promise(resolve => map.once('idle', resolve));
+        if (map.getSource('intensity')) {
+            map.getSource('intensity').setData({
+                type: 'FeatureCollection',
+                features
+            });
+            numIntensity = features.length;
+            maxDelay = (maxDistance - minDistance) * 20 + 500;
+            await new Promise(resolve => map.once('idle', resolve));
+        }
     } catch (e) {
         console.error('Failed to update intensity', e);
     }
 };
 
 const setFinalView = () => {
-    const dateString = new Date(params.time).toLocaleDateString('ja-JP', DATE_FORMAT);
-    const timeString = new Date(params.time).toLocaleTimeString('ja-JP', TIME_FORMAT);
+    const dateString = params.time ? new Date(params.time).toLocaleDateString('ja-JP', DATE_FORMAT) : '-';
+    const timeString = params.time ? new Date(params.time).toLocaleTimeString('ja-JP', TIME_FORMAT) : '-';
     const depthString = isNaN(params.depth) ? '不明' : params.depth === 0 ? 'ごく浅い' : `${params.depth}km`;
     const intensityString = params.intensity ? params.intensity.replace('-', '弱').replace('+', '強') : '-';
     const magnitudeString = isNaN(params.magnitude) ? '不明' : params.magnitude.toFixed(1);
@@ -174,7 +194,7 @@ const setFinalView = () => {
         '<div class="panel-section">' +
         '<div class="panel-section-title">震央地名</div>' +
         '<div class="panel-section-body">' +
-        `<div class="panel-location-text">${params.location}</div>` +
+        `<div class="panel-location-text">${params.location || '不明'}</div>` +
         '</div>' +
         '</div>' +
         '</div>' +
@@ -322,7 +342,73 @@ const filterData = () => {
     // NOTE: Accessing internal data of layer might be needed.
     // Or simpler: The 'hypocenterLayer' was created with 'data' variable. I should store it.
 
-    // I need to update the logic below in init to store 'hypocenterData'.
+};
+
+const findNearestEarthquake = (lng, lat, depth) => {
+    let minDist = Infinity;
+    let bestMatch = null;
+
+    // Check allQuakes
+    for (const q of allQuakes) {
+        const matches = q.cod.match(/([+-][\d\.]+)([+-][\d\.]+)([+-]\d+)?/);
+        if (!matches) continue;
+        const qLat = +matches[1];
+        const qLng = +matches[2];
+        const qDepth = matches[3] ? Math.abs(+matches[3] / 1000) : 0;
+
+        const dH = turf.distance([lng, lat], [qLng, qLat]);
+        const dV = Math.abs(depth - qDepth);
+
+        // 5km horizontal and vertical weight
+        const dist = Math.sqrt(dH * dH + dV * dV);
+        if (dist < minDist) {
+            minDist = dist;
+            bestMatch = {
+                source: 'recent',
+                params: {
+                    eid: q.eid,
+                    lng: qLng,
+                    lat: qLat,
+                    depth: qDepth,
+                    time: q.at,
+                    location: q.anm,
+                    magnitude: q.mag !== 'Ｍ不明' ? +q.mag : undefined,
+                    intensity: q.maxi
+                }
+            };
+        }
+    }
+
+    // Check HISTORICAL
+    for (const h of HISTORICAL_EARTHQUAKES) {
+        const hLng = +h.lng;
+        const hLat = +h.lat;
+        const hDepth = +h.d;
+        const dH = turf.distance([lng, lat], [hLng, hLat]);
+        const dV = Math.abs(depth - hDepth);
+        const dist = Math.sqrt(dH * dH + dV * dV);
+
+        if (dist < minDist) {
+            minDist = dist;
+            bestMatch = {
+                source: 'historical',
+                params: {
+                    id: h.id,
+                    lng: hLng,
+                    lat: hLat,
+                    depth: hDepth,
+                    time: h.t,
+                    location: h.l,
+                    magnitude: +h.m,
+                    intensity: h.s
+                }
+            };
+        }
+    }
+
+    // Threshold: 10km
+    if (minDist > 10) return null;
+    return bestMatch;
 };
 
 
@@ -368,13 +454,14 @@ let hypocenterData; // Store original data
         }
 
         // Fix ranges for UI
-        magnitudeRange = { min: Math.floor(minMag), max: Math.ceil(maxMag) };
-        if (magnitudeRange.min > magnitudeRange.max) magnitudeRange = { min: 0, max: 9 };
+        // magnitudeRange = { min: Math.floor(minMag), max: Math.ceil(maxMag) };
+        // if (magnitudeRange.min > magnitudeRange.max) magnitudeRange = { min: 0, max: 9 };
+        // Removed magnitude range calc
 
         // Controls
         if (interactive) {
             filterControl = new FilterControl({
-                magnitudeRange,
+                // magnitudeRange, // Removed
                 depthRange,
                 onFilterChange: (criteria) => {
                     Object.assign(currentFilters, criteria);
@@ -382,26 +469,52 @@ let hypocenterData; // Store original data
                 }
             });
 
+            const toggleList = (targetBg) => {
+                const bgs = [recentListBGElement, historicalListBGElement, infoBGElement];
+                const wasVisible = targetBg.style.display === 'block';
+
+                // Hide all first
+                bgs.forEach(bg => bg.style.display = 'none');
+
+                // Close filter panel if open (optional, but good for cleanliness)
+                if (filterControl && filterControl.hide) filterControl.hide();
+
+                // Toggle target
+                if (!wasVisible) {
+                    targetBg.style.display = 'block';
+                }
+            };
+
             map.addControl(new MapboxGLButtonControl([{
                 className: 'mapboxgl-ctrl-recent-list',
                 title: 'Recent earthquakes',
                 eventHandler() {
-                    recentListBGElement.style.display = 'block';
+                    toggleList(recentListBGElement);
                 }
             }, {
                 className: 'mapboxgl-ctrl-historical-list',
                 title: 'Historical earthquakes',
                 eventHandler() {
-                    historicalListBGElement.style.display = 'block';
+                    toggleList(historicalListBGElement);
                 }
             }, {
                 className: 'mapboxgl-ctrl-filter',
                 title: 'Filter',
                 eventHandler() {
+                    // Close other panels
+                    recentListBGElement.style.display = 'none';
+                    historicalListBGElement.style.display = 'none';
+                    infoBGElement.style.display = 'none';
+
                     if (!filterControl._container) {
                         filterControl.createPanel(mapElement);
                     }
-                    filterControl.show();
+                    // Toggle filter
+                    if (!filterControl.isVisible()) {
+                        filterControl.show();
+                    } else {
+                        filterControl.hide();
+                    }
                 }
             }, {
                 className: 'mapboxgl-ctrl-twitter',
@@ -413,10 +526,13 @@ let hypocenterData; // Store original data
                 className: 'mapboxgl-ctrl-info',
                 title: 'About Japan EQ Locator',
                 eventHandler() {
-                    infoBGElement.style.display = 'block';
+                    toggleList(infoBGElement);
                 }
             }]));
         }
+
+        // Add close buttons to panels
+
 
         const hypLayer = new deck.MapboxLayer({
             id: 'hypocenters',
@@ -431,7 +547,45 @@ let hypocenterData; // Store original data
                 const [rgb, r, g, b] = colorScale(d.position[2]).match(/(\d+), (\d+), (\d+)/);
                 return [+r, +g, +b];
             },
-            getRadius: 500
+            getRadius: 500,
+            onClick: (info) => {
+                if (!info.object) {
+                    // Clicked on background
+                    if (interactive && !panel.classList.contains('hidden')) {
+                        const activeListItem = document.querySelector('.menu-item.active');
+                        if (activeListItem) activeListItem.classList.remove('active');
+                        setHypocenter(); // Reset view
+                    }
+                    return;
+                }
+                const lng = info.object.position[0];
+                const lat = info.object.position[1];
+                const depth = -info.object.position[2] / 1000;
+
+                const match = findNearestEarthquake(lng, lat, depth);
+
+                let newParams;
+                if (match) {
+                    newParams = match.params;
+                } else {
+                    newParams = {
+                        lng,
+                        lat,
+                        depth,
+                        location: '不明',
+                        magnitude: NaN,
+                        intensity: null,
+                        time: null
+                    };
+                }
+
+                // Clear active list selection
+                const activeListItem = document.querySelector('.menu-item.active');
+                if (activeListItem) activeListItem.classList.remove('active');
+
+                setHypocenter(newParams);
+                updateIntensity();
+            }
         });
 
         hypocenterLayer = hypLayer;
@@ -470,9 +624,10 @@ let hypocenterData; // Store original data
             });
             hypocenterLayer.setProps({ data: filteredData });
 
-            // 2. Filter Recent List (Mag and Depth)
+            // 2. Filter Recent List (Depth and Intensity)
+            console.log('Update Filters - Current:', currentFilters);
             const filteredList = allQuakes.filter(q => {
-                const m = parseFloat(q.mag);
+                // const m = parseFloat(q.mag); 
                 // Parse depth from cod
                 const matches = q.cod.match(/([+-][\d\.]+)([+-][\d\.]+)([+-]\d+)?/);
                 let depth = 0;
@@ -480,10 +635,21 @@ let hypocenterData; // Store original data
                     depth = Math.abs(+matches[3] / 1000);
                 }
 
-                const magPass = isNaN(currentFilters.mag) || (isNaN(m) ? true : m >= currentFilters.mag);
+                // const magPass = isNaN(currentFilters.mag) || (isNaN(m) ? true : m >= currentFilters.mag); // Removed
                 const depthPass = depth <= currentFilters.depth;
-                return magPass && depthPass;
+
+                // Intensity Check
+                // q.maxi string e.g. "1", "5+", or empty? q.maxi check.
+                // If hasIntensity is true, require q.maxi to be truthy and valid.
+                let intensityPass = true;
+                if (currentFilters.hasIntensity) {
+                    intensityPass = !!(q.maxi && q.maxi !== '');
+                }
+
+                return depthPass && intensityPass;
             });
+
+            console.log(`Filtered list size: ${filteredList.length} / ${allQuakes.length}`);
 
             // Clear and repopulate list
             recentListElement.innerHTML = '';

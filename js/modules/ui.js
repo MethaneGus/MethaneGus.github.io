@@ -55,9 +55,9 @@ export function populateRecentList(quakes, eids, initialParams, container, onSel
         if (quake.ttl !== '震源・震度情報' && quake.ttl !== '遠地地震に関する情報') {
             continue;
         }
-        if (eids[quake.eid]) {
-            continue;
-        }
+        // if (eids[quake.eid]) {
+        //     continue;
+        // }
         const options = {};
         const matches = quake.cod.match(/([+-][\d\.]+)([+-][\d\.]+)([+-]\d+)?/);
         options.e = quake.eid;
